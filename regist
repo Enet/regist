@@ -1,0 +1,114 @@
+#!/bin/sh
+if [ "$1" = "--version" ] || [ "$1" = "-v" ]
+then
+  echo "regist 0.0.1, https://github.com/Enet/regist"
+  exit 0
+fi
+
+if [ "$1" = "--help" ] || [ "$1" = "-h" ]
+then
+  echo "Execute remote scripts with \e[7mregist scriptname arg1 arg2\e[0m"
+  echo ""
+  echo "Use environment variables to set up the script:"
+  echo "REGIST_TOKEN      for github token"
+  echo "REGIST_GIST_ID    for github gist id"
+  echo "REGIST_CACHE_DIR  for cache directory (~/.regist by default)"
+  echo "REGIST_MAX_TIME   for cache expiration time in seconds (10 days by default)"
+  echo ""
+  echo "--help    -h  Print help information"
+  echo "--version -v  Print current version"
+  echo "--reset   -r  Clean cache directory"
+  echo "--update  -u  Update cache for the executable script"
+  echo ""
+  echo "Examples:"
+  echo "regist -v"
+  echo "regist --reset"
+  echo "regist hello 123"
+  echo "regist hello.sh 123"
+  echo "regist --update hello 123"
+  exit 0
+fi
+
+if [ -z "$REGIST_TOKEN" ]
+then
+  echo "Store your github token to \e[7mREGIST_TOKEN\e[0m environment variable!"
+  exit 1
+fi
+
+if [ -z "$REGIST_GIST_ID" ]
+then
+  echo "Store id of the gist that contains your scripts to \e[7mREGIST_GIST_ID\e[0m environment variable!"
+  exit 1
+fi
+
+if [ -z "$REGIST_CACHE_DIR" ]
+then
+  REGIST_CACHE_DIR=~/.regist
+fi
+REGIST_CACHE_DIR=${REGIST_CACHE_DIR%%+(/)}
+
+if [ -z "$REGIST_MAX_TIME" ]
+then
+  REGIST_MAX_TIME=$((3600 * 24 * 10))
+fi
+
+if [ "$1" = "--reset" ] || [ "$1" = "-r" ]
+then
+  rm -rf "$REGIST_CACHE_DIR"
+  echo "Directory $REGIST_CACHE_DIR is successfully removed!"
+  exit 0
+fi
+
+NEED_UPDATE=0
+if [ "$1" = "--update" ] || [ "$1" = "-u" ]
+then
+  NEED_UPDATE=1
+  shift
+fi
+
+execute_script () {
+  local REAL_FILE_NAME="$1"
+  UPDATE_TIME=$(stat -c "%Y" "$REGIST_CACHE_DIR/$REAL_FILE_NAME")
+  CURRENT_TIME=$(date +%s)
+  DIFF_TIME=$(($CURRENT_TIME - $UPDATE_TIME))
+
+  if [ "$DIFF_TIME" -lt "$REGIST_MAX_TIME" ]
+  then
+    shift
+    shift
+    cat "$REGIST_CACHE_DIR/$REAL_FILE_NAME" | REGIST_EXECUTABLE="$REAL_FILE_NAME" sh -s $@
+    exit 0
+  fi
+}
+
+FILE_NAME=$1
+mkdir -p $REGIST_CACHE_DIR
+if [ -f "$REGIST_CACHE_DIR/$FILE_NAME" ] && [ $NEED_UPDATE -eq 0 ]
+then
+  execute_script "$FILE_NAME" ${@}
+fi
+
+if [ -f "$REGIST_CACHE_DIR/$FILE_NAME.sh" ] && [ $NEED_UPDATE -eq 0 ]
+then
+  execute_script "$FILE_NAME.sh" ${@}
+fi
+
+GISTS=$(curl -s -H "Authorization: token $REGIST_TOKEN" https://api.github.com/gists)
+GIST_FILES=$(echo $GISTS | jq --arg REGIST_GIST_ID "$REGIST_GIST_ID" 'map(select(.id==$REGIST_GIST_ID))' | jq '.[0].files')
+FILE_NAMES=$(echo $GIST_FILES | jq 'keys')
+FILE_INDEX=$(echo $FILE_NAMES | jq --arg FILE_NAME $FILE_NAME 'index($FILE_NAME)')
+
+if [ "$FILE_INDEX" = "null" ]
+then
+  FILE_NAME=$1.sh
+  FILE_INDEX=$(echo $FILE_NAMES | jq --arg FILE_NAME $FILE_NAME 'index($FILE_NAME)')
+  if [ "$FILE_INDEX" = "null" ]
+  then
+    echo "Script \e[7m$FILE_NAME\e[0m does not exist!"
+    exit 1
+  fi
+fi
+
+FILE_URL=$(echo $GIST_FILES | jq -r --arg FILE_NAME $FILE_NAME '.[$FILE_NAME].raw_url')
+curl -s -H "Authorization: token $REGIST_TOKEN" $FILE_URL -o "$REGIST_CACHE_DIR/$FILE_NAME"
+execute_script "$FILE_NAME" ${@}
